@@ -41,6 +41,15 @@ jobs:
           directory: ${{ runner.temp }}/llvm-18-fpsdiag
           env: 'false'
 
+      # ilammy/msvc-dev-cmd exports Visual Studio's bundled VCPKG_ROOT.
+      # Restore our own isolated path after the MSVC action.
+      - name: Restore isolated vcpkg path after MSVC setup
+        shell: pwsh
+        run: |
+          $isolatedRoot = 'C:\vcpkg-fpsdiag'
+          "VCPKG_ROOT=$isolatedRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "VCPKG_ROOT for subsequent steps: $isolatedRoot"
+
       - name: Bootstrap pinned vcpkg
         shell: pwsh
         run: |
