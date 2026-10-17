@@ -12,22 +12,48 @@ permissions:
 jobs:
   build-win64-dll:
     runs-on: windows-2022
-    timeout-minutes: 180
+    timeout-minutes: 90
     env:
       VCPKG_ROOT: 'C:\vcpkg-fpsdiag'
       VCPKG_DEFAULT_TRIPLET: x64-windows-static
       VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
       BINDGEN_EXTRA_CLANG_ARGS: --target=x86_64-pc-windows-msvc
       VSCMD_SKIP_SENDTELEMETRY: '1'
+      VCPKG_BINARY_SOURCES: 'clear;files,C:\vcpkg-fpsdiag-cache,readwrite'
 
     steps:
       - name: Checkout diagnostic fork
         uses: actions/checkout@v4
 
+      - name: Preflight source and fetch official v1.0.16 DLL baseline
+        shell: pwsh
+        run: |
+          $code = 'engine/rustdesk/src/client/io_loop.rs'
+          if (-not (Select-String -Path $code -Pattern 'RD_FPS_DIAG_FORCE30' -Quiet)) {
+            throw 'Expected FPS30 source patch was not found'
+          }
+          $url = 'https://github.com/SamuelRioTz/remotedisplay/releases/download/v1.0.16/RemoteDisplay-1.0.16-windows-x64-portable.zip'
+          $archive = Join-Path $env:RUNNER_TEMP 'RD-original-v1.0.16.zip'
+          $out = Join-Path $env:RUNNER_TEMP 'RD-original-v1.0.16'
+          & curl.exe -fL --retry 3 --retry-all-errors --retry-delay 5 -o "$archive" "$url"
+          if ($LASTEXITCODE -ne 0) { throw 'Original v1.0.16 portable ZIP could not be downloaded' }
+          Expand-Archive -LiteralPath "$archive" -DestinationPath "$out" -Force
+          $originalDll = Get-ChildItem -LiteralPath "$out" -Filter 'librustdesk.dll' -Recurse -File | Select-Object -First 1
+          if (-not $originalDll) { throw 'Original DLL missing from the official release ZIP' }
+          "RD_ORIGINAL_DLL=$($originalDll.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Found baseline DLL: $($originalDll.FullName)"
+
       - name: Set up Rust for MSVC
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+
+      - name: Restore Rust compiled dependencies on retry
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "engine/rustdesk -> target"
+          prefix-key: fps30-win64
+          cache-on-failure: 'true'
 
       - name: Initialize MSVC developer shell
         uses: ilammy/msvc-dev-cmd@v1
@@ -78,6 +104,13 @@ jobs:
           & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
           if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
 
+      - name: Restore vcpkg binary package cache
+        id: rd-vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: C:\vcpkg-fpsdiag-cache
+          key: fps30-win2022-vcpkg-120deac-${{ hashFiles('engine/rustdesk/vcpkg.json') }}-v1
+
       # Hardware decoding requires FFmpeg and Intel Media SDK headers/libraries.
       # Install the upstream fork's pinned vcpkg manifest including FFmpeg,
       # mfx-dispatch and codec SDKs rather than the incomplete classic list.
@@ -85,6 +118,7 @@ jobs:
         working-directory: engine/rustdesk
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force -Path 'C:\vcpkg-fpsdiag-cache' | Out-Null
           & "$env:VCPKG_ROOT\vcpkg.exe" install `
             --triplet x64-windows-static `
             "--x-install-root=$env:VCPKG_ROOT\installed"
@@ -95,6 +129,13 @@ jobs:
             if (-not (Test-Path $file)) { throw "Missing required FFmpeg header: $file" }
           }
           Write-Host "Verified FFmpeg headers in $base"
+
+      - name: Save vcpkg compiled packages (even if later Rust build fails)
+        if: steps.rd-vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: C:\vcpkg-fpsdiag-cache
+          key: fps30-win2022-vcpkg-120deac-${{ hashFiles('engine/rustdesk/vcpkg.json') }}-v1
 
       - name: Install Flutter SDK only for FFI code generation
         uses: subosito/flutter-action@v2
@@ -138,10 +179,46 @@ jobs:
             throw 'DLL not found at expected build output path'
           }
 
-      - name: Upload DLL for local A/B testing
+      - name: Verify exact exported API matches original 1.0.16 DLL
+        shell: pwsh
+        run: |
+          $newDll = 'engine/rustdesk/target/x86_64-pc-windows-msvc/release/librustdesk.dll'
+          if (-not (Test-Path $newDll)) { throw 'Diagnostic DLL was not built' }
+          if (-not (Test-Path $env:RD_ORIGINAL_DLL)) { throw 'Original DLL baseline missing' }
+          $pattern = '^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)'
+          $original = @(& dumpbin.exe /exports "$env:RD_ORIGINAL_DLL" | ForEach-Object {
+            if ($_ -match $pattern) { $Matches[1] }
+          } | Sort-Object -Unique)
+          $diagnostic = @(& dumpbin.exe /exports "$newDll" | ForEach-Object {
+            if ($_ -match $pattern) { $Matches[1] }
+          } | Sort-Object -Unique)
+          Write-Host "Exports: original=$($original.Count), diagnostic=$($diagnostic.Count)"
+          if ($original.Count -lt 100 -or $diagnostic.Count -lt 100) {
+            throw 'Could not read enough exported functions from DLLs'
+          }
+          $mismatch = @(Compare-Object -ReferenceObject $original -DifferenceObject $diagnostic)
+          if ($mismatch.Count -gt 0) {
+            $mismatch | Select-Object -First 30 | Format-Table | Out-String | Write-Host
+            throw "DLL exports differ from the released v1.0.16 Windows DLL ($($mismatch.Count) mismatches)"
+          }
+          Write-Host 'PASS: diagnostic DLL exports match the original (runtime still must be tested separately)'
+
+      - name: Package DLL and normal/force30 launchers
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'rd-fps30-diagnostic-package'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item 'engine/rustdesk/target/x86_64-pc-windows-msvc/release/librustdesk.dll' "$out/librustdesk.dll"
+          Copy-Item 'tools/windows/run-fps30-normal.cmd' "$out/run-fps30-normal.cmd"
+          Copy-Item 'tools/windows/run-fps30-force30.cmd' "$out/run-fps30-force30.cmd"
+          Copy-Item 'tools/windows/README_FPS30_KO.md' "$out/README_FPS30_KO.md"
+          Copy-Item 'LICENSE' "$out/LICENSE.txt"
+          Copy-Item 'NOTICE.md' "$out/NOTICE.md"
+
+      - name: Upload verified diagnostic kit for separate portable copy
         uses: actions/upload-artifact@v4
         with:
-          name: RemoteDisplay-FPS30-Diagnostic-DLL
-          path: engine/rustdesk/target/x86_64-pc-windows-msvc/release/librustdesk.dll
+          name: RemoteDisplay-FPS30-Diagnostic-Kit
+          path: ${{ runner.temp }}/rd-fps30-diagnostic-package/
           retention-days: 14
           if-no-files-found: error
