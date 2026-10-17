@@ -14,7 +14,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 180
     env:
-      VCPKG_ROOT: ${{ runner.temp }}\vcpkg-fpsdiag
+      VCPKG_ROOT: 'C:\vcpkg-fpsdiag'
       VCPKG_DEFAULT_TRIPLET: x64-windows-static
       VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
       BINDGEN_EXTRA_CLANG_ARGS: --target=x86_64-pc-windows-msvc
