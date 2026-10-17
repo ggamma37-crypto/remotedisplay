@@ -1,0 +1,118 @@
+name: Remote Display FPS30 diagnostic DLL
+
+on:
+  push:
+    branches:
+      - fps30-diagnostic
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-win64-dll:
+    runs-on: windows-2022
+    timeout-minutes: 180
+    env:
+      VCPKG_ROOT: ${{ runner.temp }}\vcpkg-fpsdiag
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+      VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+      BINDGEN_EXTRA_CLANG_ARGS: --target=x86_64-pc-windows-msvc
+      VSCMD_SKIP_SENDTELEMETRY: '1'
+
+    steps:
+      - name: Checkout diagnostic fork
+        uses: actions/checkout@v4
+
+      - name: Set up Rust for MSVC
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Initialize MSVC developer shell
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Install LLVM 18 (bindgen)
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: '18.1.8'
+          directory: ${{ runner.temp }}/llvm-18-fpsdiag
+          env: 'false'
+
+      - name: Bootstrap pinned vcpkg
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git "$env:VCPKG_ROOT"
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg clone failed' }
+          git -C "$env:VCPKG_ROOT" fetch --depth 1 origin 120deac3062162151622ca4860575a33844ba10b
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg baseline fetch failed' }
+          git -C "$env:VCPKG_ROOT" checkout 120deac3062162151622ca4860575a33844ba10b
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg baseline checkout failed' }
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
+
+      - name: Install dependencies (classic vcpkg, no full FFmpeg rebuild)
+        shell: pwsh
+        run: |
+          Push-Location "$env:RUNNER_TEMP"
+          & "$env:VCPKG_ROOT\vcpkg.exe" install `
+            'opus:x64-windows-static' `
+            'libvpx:x64-windows-static' `
+            'libyuv:x64-windows-static' `
+            'aom:x64-windows-static' `
+            'libjpeg-turbo:x64-windows-static'
+          $exitCode = $LASTEXITCODE
+          Pop-Location
+          if ($exitCode -ne 0) { throw 'vcpkg dependencies failed' }
+
+      - name: Install Flutter SDK only for FFI code generation
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.24.5'
+
+      - name: Generate missing Rust FFI bridge (required for the DLL)
+        working-directory: engine/rustdesk
+        shell: pwsh
+        env:
+          CLANG_PATH: ${{ env.LLVM_PATH }}\bin\clang.exe
+          LIBCLANG_PATH: ${{ env.LLVM_PATH }}\bin
+        run: |
+          Push-Location flutter
+          flutter pub get
+          $flutterExit = $LASTEXITCODE
+          Pop-Location
+          if ($flutterExit -ne 0) { throw 'Flutter package resolution failed' }
+          cargo install cargo-expand --version 1.0.95 --locked
+          if ($LASTEXITCODE -ne 0) { throw 'cargo-expand installation failed' }
+          cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid --locked
+          if ($LASTEXITCODE -ne 0) { throw 'flutter_rust_bridge_codegen installation failed' }
+          flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart --llvm-path "$env:LLVM_PATH"
+          if ($LASTEXITCODE -ne 0) { throw 'FFI Rust bridge generation failed' }
+          if (-not (Test-Path 'src/bridge_generated.rs')) { throw 'Bridge source missing' }
+
+      - name: Build only modified Rust engine DLL
+        working-directory: engine/rustdesk
+        shell: pwsh
+        env:
+          CLANG_PATH: ${{ env.LLVM_PATH }}\bin\clang.exe
+          LIBCLANG_PATH: ${{ env.LLVM_PATH }}\bin
+        run: |
+          Write-Host "LLVM path: $env:LLVM_PATH"
+          Write-Host "MSVC: $env:VCToolsInstallDir"
+          rustup show
+          cargo build --locked --release --lib --features flutter,hwcodec --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Rust DLL build failed' }
+          if (-not (Test-Path 'target/x86_64-pc-windows-msvc/release/librustdesk.dll')) {
+            throw 'DLL not found at expected build output path'
+          }
+
+      - name: Upload DLL for local A/B testing
+        uses: actions/upload-artifact@v4
+        with:
+          name: RemoteDisplay-FPS30-Diagnostic-DLL
+          path: engine/rustdesk/target/x86_64-pc-windows-msvc/release/librustdesk.dll
+          retention-days: 14
+          if-no-files-found: error
