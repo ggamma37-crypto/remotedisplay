@@ -62,19 +62,23 @@ jobs:
           & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
           if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
 
-      - name: Install dependencies (classic vcpkg, no full FFmpeg rebuild)
+      # Hardware decoding requires FFmpeg and Intel Media SDK headers/libraries.
+      # Install the upstream fork's pinned vcpkg manifest including FFmpeg,
+      # mfx-dispatch and codec SDKs rather than the incomplete classic list.
+      - name: Install all codec dependencies from pinned vcpkg manifest
+        working-directory: engine/rustdesk
         shell: pwsh
         run: |
-          Push-Location "$env:RUNNER_TEMP"
           & "$env:VCPKG_ROOT\vcpkg.exe" install `
-            'opus:x64-windows-static' `
-            'libvpx:x64-windows-static' `
-            'libyuv:x64-windows-static' `
-            'aom:x64-windows-static' `
-            'libjpeg-turbo:x64-windows-static'
-          $exitCode = $LASTEXITCODE
-          Pop-Location
-          if ($exitCode -ne 0) { throw 'vcpkg dependencies failed' }
+            --triplet x64-windows-static `
+            "--x-install-root=$env:VCPKG_ROOT\installed"
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg manifest dependency install failed' }
+          $base = "$env:VCPKG_ROOT\installed\x64-windows-static"
+          foreach ($header in @('libavcodec/avcodec.h', 'libavutil/attributes.h')) {
+            $file = Join-Path "$base\include" $header
+            if (-not (Test-Path $file)) { throw "Missing required FFmpeg header: $file" }
+          }
+          Write-Host "Verified FFmpeg headers in $base"
 
       - name: Install Flutter SDK only for FFI code generation
         uses: subosito/flutter-action@v2
