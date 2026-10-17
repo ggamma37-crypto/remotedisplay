@@ -29,7 +29,7 @@ jobs:
         shell: pwsh
         run: |
           $code = 'engine/rustdesk/src/client/io_loop.rs'
-          if (-not (Select-String -Path $code -Pattern 'RD_FPS_DIAG_FORCE30' -Quiet)) {
+          if (-not (Select-String -Path $code -Pattern 'RD_FPS_DIAG_CAP' -Quiet)) {
             throw 'Expected FPS30 source patch was not found'
           }
           $url = 'https://github.com/SamuelRioTz/remotedisplay/releases/download/v1.0.16/RemoteDisplay-1.0.16-windows-x64-portable.zip'
@@ -42,6 +42,9 @@ jobs:
           if (-not $originalDll) { throw 'Original DLL missing from the official release ZIP' }
           "RD_ORIGINAL_DLL=$($originalDll.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Found baseline DLL: $($originalDll.FullName)"
+          foreach ($script in @('run-fps30-normal.cmd', 'run-fps30-force30.cmd', 'run-fps30-force60.cmd', 'run-fps30-force120.cmd')) {
+            if (-not (Test-Path "tools/windows/$script")) { throw "Missing diagnostic launcher: $script" }
+          }
 
       - name: Set up Rust for MSVC
         uses: dtolnay/rust-toolchain@stable
@@ -211,6 +214,8 @@ jobs:
           Copy-Item 'engine/rustdesk/target/x86_64-pc-windows-msvc/release/librustdesk.dll' "$out/librustdesk.dll"
           Copy-Item 'tools/windows/run-fps30-normal.cmd' "$out/run-fps30-normal.cmd"
           Copy-Item 'tools/windows/run-fps30-force30.cmd' "$out/run-fps30-force30.cmd"
+          Copy-Item 'tools/windows/run-fps30-force60.cmd' "$out/run-fps30-force60.cmd"
+          Copy-Item 'tools/windows/run-fps30-force120.cmd' "$out/run-fps30-force120.cmd"
           Copy-Item 'tools/windows/README_FPS30_KO.md' "$out/README_FPS30_KO.md"
           Copy-Item 'LICENSE' "$out/LICENSE.txt"
           Copy-Item 'NOTICE.md' "$out/NOTICE.md"
