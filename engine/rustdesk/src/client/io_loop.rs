@@ -1174,11 +1174,14 @@ impl<T: InvokeUiSession> Remote<T> {
         // Diagnostic mode only: compare observed throughput with local decoder
         // processing capacity and queue depth, in either normal or forced mode.
         // No environment variable = original upstream behavior.
-        let force30 = matches!(
-            std::env::var("RD_FPS_DIAG_FORCE30").as_deref(),
-            Ok("1")
-        );
-        let log_diagnostics = force30
+        // A set ceiling bypasses the Windows client's adaptive-FPS feedback.
+        // This only asks the macOS host for a maximum: host QoS may set a lower FPS.
+        // Valid diagnostic values are 5..=120 (e.g. 30, 60, 120).
+        let diagnostic_fps_cap = std::env::var("RD_FPS_DIAG_CAP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|fps| (5..=120).contains(fps));
+        let log_diagnostics = diagnostic_fps_cap.is_some()
             || matches!(std::env::var("RD_FPS_DIAG_LOG").as_deref(), Ok("1"));
         if log_diagnostics {
             let last_auto_fps = self.handler.lc.read().unwrap().last_auto_fps;
@@ -1190,8 +1193,9 @@ impl<T: InvokeUiSession> Remote<T> {
                 let decoder_capacity_fps = *thread.decode_fps.read().unwrap();
                 let displayed_fps = real_fps_map.get(display).copied().unwrap_or_default();
                 log::info!(
-                    "RD_FPS_DIAG mode={} display={} displayed_fps={} decoder_capacity_fps={:?} queue={}/{} direct={} last_auto_fps={:?}",
-                    if force30 { "force30" } else { "normal" },
+                    "RD_FPS_DIAG mode={} requested_fps_cap={:?} display={} displayed_fps={} decoder_capacity_fps={:?} queue={}/{} direct={} last_auto_fps={:?}",
+                    if diagnostic_fps_cap.is_some() { "fixed-ceiling" } else { "normal" },
+                    diagnostic_fps_cap,
                     display,
                     displayed_fps,
                     decoder_capacity_fps,
@@ -1205,24 +1209,24 @@ impl<T: InvokeUiSession> Remote<T> {
 
         // Preserve the original queue-overflow refresh logic in BOTH modes.
         // Only the automatic FPS feedback below differs between modes.
-        let refresh_capacity_fps = if force30 {
-            if self.handler.lc.read().unwrap().last_auto_fps != Some(30) {
+        let refresh_capacity_fps = if let Some(cap) = diagnostic_fps_cap {
+            if self.handler.lc.read().unwrap().last_auto_fps != Some(cap) {
                 let mut misc = Misc::new();
                 misc.set_option(OptionMessage {
-                    custom_fps: 30,
+                    custom_fps: cap as _,
                     ..Default::default()
                 });
                 let mut msg = Message::new();
                 msg.set_misc(misc);
                 self.sender.send(Data::Message(msg)).ok();
-                self.handler.lc.write().unwrap().last_auto_fps = Some(30);
-                log::warn!("RD_FPS_DIAG: client auto-FPS feedback bypassed; requested server maximum 30 FPS");
+                self.handler.lc.write().unwrap().last_auto_fps = Some(cap);
+                log::warn!("RD_FPS_DIAG: client auto-FPS feedback bypassed; requested server maximum {} FPS", cap);
             }
             self.video_threads
                 .values()
                 .filter_map(|thread| *thread.decode_fps.read().unwrap())
                 .min()
-                .unwrap_or(30)
+                .unwrap_or(cap)
         } else {
             self.video_threads.iter_mut().for_each(|(k, v)| {
                 let real_fps = real_fps_map.get(k).cloned().unwrap_or_default();
