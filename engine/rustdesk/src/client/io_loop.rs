@@ -1171,6 +1171,45 @@ impl<T: InvokeUiSession> Remote<T> {
     // The controlled end can consider auto fps as the maximum decoding fps.
     #[inline]
     fn fps_control(&mut self, direct: bool, real_fps_map: HashMap<usize, i32>) {
+        // Remote Display FPS diagnostic: enable only in a separate test copy.
+        // The client normally lowers the host's FPS based on its decode rate.
+        // This mode forces the host ceiling to 30 FPS and logs client throughput.
+        if std::env::var("RD_FPS_DIAG_FORCE30")
+            .map(|value| value == "1")
+            .unwrap_or(false)
+        {
+            for (display, thread) in self.video_threads.iter() {
+                let (queue_len, queue_cap) = {
+                    let queue = thread.video_queue.read().unwrap();
+                    (queue.len(), queue.capacity())
+                };
+                let decode_fps = *thread.decode_fps.read().unwrap();
+                let shown_fps = real_fps_map.get(display).copied().unwrap_or_default();
+                log::info!(
+                    "RD_FPS_DIAG display={} shown_fps={} decode_fps={:?} queue={}/{} direct={} requested_ceiling=30",
+                    display,
+                    shown_fps,
+                    decode_fps,
+                    queue_len,
+                    queue_cap,
+                    direct,
+                );
+            }
+            if self.handler.lc.read().unwrap().last_auto_fps != Some(30) {
+                let mut misc = Misc::new();
+                misc.set_option(OptionMessage {
+                    custom_fps: 30,
+                    ..Default::default()
+                });
+                let mut message = Message::new();
+                message.set_misc(misc);
+                self.sender.send(Data::Message(message)).ok();
+                self.handler.lc.write().unwrap().last_auto_fps = Some(30);
+                log::warn!("RD_FPS_DIAG: automatic FPS control bypassed; set FPS ceiling to 30");
+            }
+            // Diagnostic only: deliberately skip automatic queue-based throttling.
+            return;
+        }
         self.video_threads.iter_mut().for_each(|(k, v)| {
             let real_fps = real_fps_map.get(k).cloned().unwrap_or_default();
             if real_fps == 0 {
