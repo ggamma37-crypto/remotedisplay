@@ -1,45 +1,52 @@
-# Remote Display v1.0.16 FPS30 diagnostic
+# Remote Display 1.0.16 — FPS30 진단용 버전
 
-**Purpose:** Compare the Windows client's automatic FPS feedback against a
-diagnostic mode that requests a 30 FPS *maximum* from the Mac. The Mac still
-has separate QoS/network-delay controls: neither mode guarantees 30 displayed FPS.
+이 버전의 목적은 **Windows 클라이언트의 자동 FPS 제한**이 실제 끊김의 원인인지 확인하는 것입니다.
 
-## What changes?
-- Only a freshly built `librustdesk.dll` from the same v1.0.16 source.
-- NORMAL: original FPS control; `RD_FPS_DIAG_LOG=1` adds one measurement per second.
-- FORCE30: `RD_FPS_DIAG_FORCE30=1` bypasses client auto-FPS feedback.
-- Both modes log displayed FPS, estimated decoder processing capacity, queue
-  occupancy, direct connection flag and the last auto-FPS value.
-- These values **do not** measure Mac screen capture or host encode FPS.
+> 진단 모드는 Mac 서버에 최대 30FPS를 요청합니다. Mac 서버에도 별도의
+> 네트워크 지연 기반 FPS 제한이 있기 때문에 **30FPS를 보장하는 기능은 아닙니다.**
 
-## How to test safely
-1. Keep the existing portable installation untouched. Exit Remote Display completely.
-2. Copy the entire existing **v1.0.16 portable** folder to a new directory.
-3. Only after the workflow build succeeds *and the export-check step passes*, put
-   the artifact's DLL and both CMD files next to `remotedisplay.exe` inside
-   that copied directory, replacing the copied DLL only.
-4. Run `run-fps30-normal.cmd`. Connect to the same Mac virtual display.
-   For ~30 seconds make consistent motion, e.g. continuously move a window.
-   Record displayed FPS, input latency, codec, resolution.
-5. Exit Remote Display completely. Run `run-fps30-force30.cmd` and repeat
-   the same test for ~15–30 seconds.
-6. **If delay, memory usage, or queue size grows, disconnect immediately.**
-7. Inspect the Windows Remote Display client logs under
-   `%APPDATA%\RemoteDisplay`, searching for `RD_FPS_DIAG` and
-   `Set fps to`. In FORCE30 you should see the bypass log once.
-8. Restore original behavior by exiting the diagnostic copy and starting
-   the original portable; nothing is installed or changed on the Mac.
+## 설치하지 않고 안전하게 비교하는 방법
 
-## Interpreting results
-- FORCE30 yields 20–30 FPS without lag: client auto-FPS feedback was limiting.
-- FORCE30 stays ~5–11 FPS: check Mac capture/encoder and client processing.
-- FORCE30 FPS rises but queue/delay climbs: genuine processing/transport bottleneck.
-- The Mac's separate VideoQoS can limit FPS based on delay and frame acknowledgements;
-  a client request for 30 FPS is only a ceiling, not a forced frame-production rate.
+1. 사용 중인 Remote Display를 **완전히 종료**합니다.
+2. 기존 Remote Display 1.0.16 포터블 폴더를 **통째로 복사**합니다.
+   기존 폴더와 그 안의 DLL은 절대 수정하지 마세요.
+3. GitHub Actions 빌드가 성공하고 **DLL 함수 호환성 검사도 PASS**한 뒤,
+   다운로드한 진단 패키지의 파일을 복사한 포터블 폴더에 넣습니다.
+   `librustdesk.dll`은 **복사본에서만 교체**합니다.
+4. 복사본 안의 `run-fps30-normal.cmd`을 더블클릭합니다.
+   동일한 Mac 가상 모니터에 연결한 다음, 창을 계속 움직여 약 30초 동안
+   실제 FPS·지연·해상도·코덱을 기록합니다.
+5. 프로그램을 완전히 종료한 후 `run-fps30-force30.cmd`으로 실행합니다.
+   동일한 작업을 약 15~30초 동안 반복해 비교합니다.
+6. **끊김이나 지연이 심해지거나 화면 반응이 이상하면 즉시 연결을 끊으세요.**
+7. 원래 상태로 돌아가려면 진단용 복사본을 종료하고 기존 포터블을 실행하면 됩니다.
+   Mac 쪽 설정이나 Windows 프로그램 설치 상태는 변경하지 않습니다.
 
-## Important limitations
-- This is a **diagnostic build**, not a permanent fix.
-- Exported-function matching cannot guarantee runtime compatibility; test only
-  with a separate portable copy, never with the original folder.
-- GitHub Actions builds and step validation must succeed before replacing any DLL.
-- If the workflow fails, do not substitute a partial DLL or skip validation.
+## 로그
+
+Windows의 Remote Display 로그 폴더: `%APPDATA%\RemoteDisplay`
+
+`RD_FPS_DIAG`, `Set fps to` 문자열을 검색하면 됩니다.
+
+- **normal**: 기존 자동 FPS 제한을 그대로 적용하고 진단값을 기록합니다.
+- **force30**: Windows에서 서버 FPS 상한을 자동으로 내리는 동작만 우회합니다.
+- `displayed_fps`: Windows에서 표시한 실제 FPS
+- `decoder_capacity_fps`: 영상 처리 시간으로 추정한 디코더 처리 가능 속도
+- `queue`: 대기 중인 프레임 수 / 대기열 용량
+- `last_auto_fps`: 클라이언트의 마지막 자동 FPS 설정
+
+**참고:** 이 로그는 Mac에서 캡처한 실제 프레임 수나 인코딩 FPS까지 직접 측정하지 않습니다.
+
+## 결과 해석
+
+| 결과 | 해석 |
+|---|---|
+| force30에서 지연 없이 20~30FPS | Windows 자동 제한이 주요 원인일 가능성이 큼 |
+| 두 모드 모두 약 5~11FPS | Mac 캡처·인코딩·서버 QoS 또는 클라이언트 처리 병목 추가 조사 |
+| FPS만 오르고 입력 지연·queue가 증가 | 실제 처리량/전송량이 따라가지 못하는 상황 |
+
+## 주의사항
+
+이 파일은 **진단용**이며 상시 사용을 권장하지 않습니다.
+DLL의 공개 함수 목록 비교는 기본적인 호환성 검사일 뿐 실행 안정성까지 보증하지 않습니다.
+GitHub Actions가 실패한 상태이거나 호환성 검사를 통과하지 않은 DLL을 사용하지 마세요.
