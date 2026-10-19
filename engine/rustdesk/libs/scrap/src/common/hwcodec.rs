@@ -390,6 +390,14 @@ pub struct HwRamDecoderImage<'a> {
 }
 
 impl HwRamDecoderImage<'_> {
+    pub fn pixel_format_name(&self) -> &'static str {
+        match self.frame.pixfmt {
+            AVPixelFormat::AV_PIX_FMT_NV12 => "NV12",
+            AVPixelFormat::AV_PIX_FMT_YUV420P => "YUV420P",
+            _ => "other",
+        }
+    }
+
     // rgb [in/out] fmt and stride must be set in ImageRgb
     pub fn to_fmt(&self, rgb: &mut ImageRgb, i420: &mut Vec<u8>) -> ResultType<()> {
         let frame = self.frame;
@@ -402,8 +410,14 @@ impl HwRamDecoderImage<'_> {
         rgb.raw.resize(rgb.h * bytes_per_row, 0);
         match frame.pixfmt {
             AVPixelFormat::AV_PIX_FMT_NV12 => {
-                // I420ToARGB is much faster than NV12ToARGB in tests on Windows
-                if cfg!(windows) {
+                // Diagnostic A/B only: choose the direct one-pass libyuv path with
+                // RD_NV12_DIRECT=1. The existing two-pass Windows path is the default.
+                static DIRECT_NV12: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                let direct_nv12 = *DIRECT_NV12.get_or_init(|| {
+                    std::env::var("RD_NV12_DIRECT").ok().as_deref() == Some("1")
+                });
+                // Existing Windows path is NV12 -> I420 -> ARGB/ABGR.
+                if cfg!(windows) && !direct_nv12 {
                     let Ok((linesize_i420, offset_i420, len_i420)) = ffmpeg_linesize_offset_length(
                         AVPixelFormat::AV_PIX_FMT_YUV420P,
                         width as _,
