@@ -1,9 +1,9 @@
-name: Remote Display FPS30 diagnostic DLL
+name: Remote Display passive FPS trace DLL
 
 on:
   push:
     branches:
-      - fps30-diagnostic
+      - fps-passive-trace
   workflow_dispatch:
 
 permissions:
@@ -141,7 +141,7 @@ jobs:
       - name: Upload DLL for local A/B testing
         uses: actions/upload-artifact@v4
         with:
-          name: RemoteDisplay-FPS30-Diagnostic-DLL
+          name: RemoteDisplay-Passive-FPS-Trace-DLL
           path: engine/rustdesk/target/x86_64-pc-windows-msvc/release/librustdesk.dll
           retention-days: 14
           if-no-files-found: error
