@@ -32,6 +32,28 @@ const OS_LOWER_MACOS: &str = "macos";
 #[allow(dead_code)]
 const OS_LOWER_ANDROID: &str = "android";
 
+/// Opt-in Windows -> macOS physical modifier layout, scoped to Remote Display.
+/// Windows Ctrl -> Mac Control; Win -> Option; Left Alt -> Command;
+/// Right Alt (AltGr) -> F18 for the user's right-Command Hangul toggle.
+#[cfg(target_os = "windows")]
+pub fn mac_modifier_layout_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RD_MAC_KEYMAP").ok().as_deref() == Some("1")
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn mac_modifier_override(position_code: u32) -> Option<u32> {
+    match position_code {
+        0xE05B => Some(0x3A), // Left Win -> Left Option
+        0xE05C => Some(0x3D), // Right Win -> Right Option
+        0x0038 => Some(0x37), // Left Alt -> Left Command
+        0xE038 => Some(0x4F), // Right Alt -> F18 (right Command's user mapping)
+        _ => None,
+    }
+}
+
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 static KEYBOARD_HOOKED: AtomicBool = AtomicBool::new(false);
 
@@ -940,7 +962,7 @@ fn update_modifiers_state(event: &Event) {
 pub fn event_to_key_events(
     mut peer: String,
     event: &Event,
-    keyboard_mode: KeyboardMode,
+    mut keyboard_mode: KeyboardMode,
     _lock_modes: Option<i32>,
 ) -> Vec<KeyEvent> {
     peer.retain(|c| !c.is_whitespace());
@@ -955,6 +977,32 @@ pub fn event_to_key_events(
             TO_RELEASE.lock().unwrap().remove(&key);
         }
         _ => {}
+    }
+
+    #[cfg(target_os = "windows")]
+    if peer == OS_LOWER_MACOS && mac_modifier_layout_enabled() {
+        // Physical map mode makes modifiers consistent with both shortcuts
+        // and normal key presses, even if the session selected Translate mode.
+        keyboard_mode = KeyboardMode::Map;
+        // Windows AltGr emits a synthetic Ctrl event; never inject that on Mac.
+        if event.position_code == 0x021D {
+            return Vec::new();
+        }
+        let down = match event.event_type {
+            EventType::KeyPress(_) => Some(true),
+            EventType::KeyRelease(_) => Some(false),
+            _ => None,
+        };
+        if let (Some(mac_code), Some(down)) = (
+            mac_modifier_override(event.position_code as u32),
+            down,
+        ) {
+            let mut mapped = KeyEvent::new();
+            mapped.mode = KeyboardMode::Map.into();
+            mapped.down = down;
+            mapped.set_chr(mac_code);
+            return vec![mapped];
+        }
     }
 
     let mut key_event = KeyEvent::new();
