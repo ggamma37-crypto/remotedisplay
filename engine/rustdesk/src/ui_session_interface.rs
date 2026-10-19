@@ -776,6 +776,15 @@ impl<T: InvokeUiSession> Session<T> {
         // mode: legacy(0), map(1), translate(2), auto(3)
 
         let mut msg = evt.clone();
+        // RD_MAC_KEYMAP owns physical modifier mapping for Windows -> Mac.
+        // Do not apply the separate Control<->Command legacy swap a second time.
+        #[cfg(windows)]
+        if !(self.peer_platform() == "Mac OS"
+            && crate::keyboard::mac_modifier_layout_enabled())
+        {
+            self.swap_modifier_key(&mut msg);
+        }
+        #[cfg(not(windows))]
         self.swap_modifier_key(&mut msg);
         let mut msg_out = Message::new();
         msg_out.set_key_event(msg);
@@ -1248,6 +1257,34 @@ impl<T: InvokeUiSession> Session<T> {
         // #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let (alt, ctrl, shift, command) =
             keyboard::client::get_modifiers_state(alt, ctrl, shift, command);
+        #[cfg(windows)]
+        let (alt, ctrl, shift, command) = {
+            // Flutter's wheel JSON does not always carry Shift. The existing
+            // modifier cache may lag behind; consult the actual Windows key.
+            let physical_shift = if event_type == MOUSE_TYPE_WHEEL
+                && self.peer_platform() == "Mac OS"
+            {
+                unsafe {
+                    (winapi::um::winuser::GetAsyncKeyState(
+                        winapi::um::winuser::VK_LSHIFT
+                    ) as u16 & 0x8000) != 0
+                        || (winapi::um::winuser::GetAsyncKeyState(
+                            winapi::um::winuser::VK_RSHIFT
+                        ) as u16 & 0x8000) != 0
+                }
+            } else {
+                false
+            };
+            let shift = shift || physical_shift;
+            if self.peer_platform() == "Mac OS"
+                && crate::keyboard::mac_modifier_layout_enabled()
+            {
+                // Windows Win is now Mac Option; Windows Alt is Mac Command.
+                (command, ctrl, shift, alt)
+            } else {
+                (alt, ctrl, shift, command)
+            }
+        };
         let is_left = (mask & (MOUSE_BUTTON_LEFT << 3)) > 0;
         let is_right = (mask & (MOUSE_BUTTON_RIGHT << 3)) > 0;
         if is_left ^ is_right {
@@ -1919,6 +1956,12 @@ impl<T: InvokeUiSession> Interface for Session<T> {
     }
 
     fn swap_modifier_mouse(&self, msg: &mut hbb_common::protos::message::MouseEvent) {
+        #[cfg(windows)]
+        if self.peer_platform() == "Mac OS"
+            && crate::keyboard::mac_modifier_layout_enabled()
+        {
+            return;
+        }
         let allow_swap_key = self.get_toggle_option("allow_swap_key".to_string());
         if allow_swap_key {
             msg.modifiers = msg
