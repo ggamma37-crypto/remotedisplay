@@ -1,9 +1,9 @@
-name: Remote Display passive FPS trace DLL
+name: Remote Display HEVC stage trace DLL
 
 on:
   push:
     branches:
-      - fps-passive-trace
+      - fps-hevc-stage-trace
   workflow_dispatch:
 
 permissions:
@@ -141,7 +141,7 @@ jobs:
       - name: Upload DLL for local A/B testing
         uses: actions/upload-artifact@v4
         with:
-          name: RemoteDisplay-Passive-FPS-Trace-DLL
+          name: RemoteDisplay-HEVC-Stage-Trace-DLL
           path: engine/rustdesk/target/x86_64-pc-windows-msvc/release/librustdesk.dll
           retention-days: 14
           if-no-files-found: error
