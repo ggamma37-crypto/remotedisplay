@@ -774,16 +774,93 @@ impl Decoder {
         rgb: &mut ImageRgb,
         i420: &mut Vec<u8>,
     ) -> ResultType<bool> {
+        // Passive diagnostic: measure decode/readback separately from CPU color conversion.
+        // The original decode -> to_fmt -> renderer path and FPS feedback are unchanged.
+        #[derive(Default)]
+        struct RdStageStats {
+            started: Option<std::time::Instant>,
+            packets: u64,
+            images: u64,
+            decode_ns: u128,
+            convert_ns: u128,
+            max_decode_ns: u128,
+            max_convert_ns: u128,
+            width: usize,
+            height: usize,
+            pixfmt: &'static str,
+        }
+        std::thread_local! {
+            static RD_STAGE_STATS: std::cell::RefCell<RdStageStats> =
+                std::cell::RefCell::new(RdStageStats::default());
+        }
+        let rd_trace = std::env::var("RD_FPS_TRACE").ok().as_deref() == Some("1");
+        let mut rd_packets = 0u64;
+        let mut rd_images = 0u64;
+        let mut rd_decode_ns = 0u128;
+        let mut rd_convert_ns = 0u128;
+        let mut rd_max_decode_ns = 0u128;
+        let mut rd_max_convert_ns = 0u128;
+        let mut rd_pixfmt = "none";
         let mut ret = false;
-        for h264 in frames.frames.iter() {
-            for image in decoder.decode(&h264.data)? {
-                // TODO: just process the last frame
-                if image.to_fmt(rgb, i420).is_ok() {
+        for encoded in frames.frames.iter() {
+            let rd_decode_start = std::time::Instant::now();
+            let images = decoder.decode(&encoded.data)?;
+            let rd_one_decode = rd_decode_start.elapsed().as_nanos();
+            if rd_trace {
+                rd_packets += 1;
+                rd_decode_ns += rd_one_decode;
+                rd_max_decode_ns = rd_max_decode_ns.max(rd_one_decode);
+            }
+            for image in images {
+                let rd_convert_start = std::time::Instant::now();
+                let converted = image.to_fmt(rgb, i420).is_ok();
+                let rd_one_convert = rd_convert_start.elapsed().as_nanos();
+                if rd_trace {
+                    rd_images += 1;
+                    rd_convert_ns += rd_one_convert;
+                    rd_max_convert_ns = rd_max_convert_ns.max(rd_one_convert);
+                    rd_pixfmt = image.pixel_format_name();
+                }
+                if converted {
                     ret = true;
                 }
             }
         }
-        return Ok(ret);
+        if rd_trace {
+            RD_STAGE_STATS.with(|cell| {
+                let mut st = cell.borrow_mut();
+                if st.started.is_none() {
+                    st.started = Some(std::time::Instant::now());
+                }
+                st.packets += rd_packets;
+                st.images += rd_images;
+                st.decode_ns += rd_decode_ns;
+                st.convert_ns += rd_convert_ns;
+                st.max_decode_ns = st.max_decode_ns.max(rd_max_decode_ns);
+                st.max_convert_ns = st.max_convert_ns.max(rd_max_convert_ns);
+                if rd_images > 0 {
+                    st.width = rgb.w;
+                    st.height = rgb.h;
+                    st.pixfmt = rd_pixfmt;
+                }
+                if st.started.unwrap().elapsed() >= std::time::Duration::from_secs(5) {
+                    log::info!(
+                        "RDTRACE_STAGE width={} height={} pixfmt={} packets={} images={} decode_readback_avg_ms={:.2} convert_avg_ms={:.2} decode_readback_max_ms={:.2} convert_max_ms={:.2} nv12_direct={}",
+                        st.width, st.height, st.pixfmt, st.packets, st.images,
+                        st.decode_ns as f64 / st.packets.max(1) as f64 / 1e6,
+                        st.convert_ns as f64 / st.images.max(1) as f64 / 1e6,
+                        st.max_decode_ns as f64 / 1e6,
+                        st.max_convert_ns as f64 / 1e6,
+                        std::env::var("RD_NV12_DIRECT").ok().as_deref() == Some("1"),
+                    );
+                    *st = RdStageStats {
+                        started: Some(std::time::Instant::now()),
+                        ..Default::default()
+                    };
+                }
+            });
+        }
+        Ok(ret)
     }
 
     #[cfg(feature = "vram")]
