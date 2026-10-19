@@ -2933,6 +2933,14 @@ pub fn start_video_thread<F, T>(
         let mut count = 0;
         let mut duration = std::time::Duration::ZERO;
         let mut skip_beginning = 0;
+        // Passive per-decoder processing profile; opt-in only.
+        let rd_trace = std::env::var("RD_FPS_TRACE").ok().as_deref() == Some("1");
+        let mut rd_period = std::time::Instant::now();
+        let mut rd_processed = 0u64;
+        let mut rd_decode_ns = 0u128;
+        let mut rd_callback_ns = 0u128;
+        let mut rd_max_decode_ns = 0u128;
+        let mut rd_rejected = 0u64;
         // remotedisplay: recovery from a decoder stuck on an old picture size. When the
         // captured display changes size without the decoder being recreated, a
         // hardware decoder (D3D11VA, VideoToolbox) keeps handing out pictures of the
@@ -2997,14 +3005,24 @@ pub fn start_video_thread<F, T>(
                                 reset_on_next_key_frame = false;
                                 size_mismatch_since = None;
                             }
-                            match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
+                            let rd_decode_start = std::time::Instant::now();
+                            let rd_result = handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma);
+                            let rd_decode_elapsed = rd_decode_start.elapsed().as_nanos();
+                            match rd_result {
                                 Ok(true) => {
+                                    let rd_callback_start = std::time::Instant::now();
                                     video_callback(
                                         display,
                                         &mut handler.rgb,
                                         handler.texture.texture,
                                         pixelbuffer,
                                     );
+                                    if rd_trace {
+                                        rd_processed += 1;
+                                        rd_decode_ns += rd_decode_elapsed;
+                                        rd_callback_ns += rd_callback_start.elapsed().as_nanos();
+                                        rd_max_decode_ns = rd_max_decode_ns.max(rd_decode_elapsed);
+                                    }
                                     if pixelbuffer {
                                         let rejected =
                                             session.ui_handler.rgba_size_mismatches(display);
@@ -3059,10 +3077,30 @@ pub fn start_video_thread<F, T>(
                                     //
                                     // to-do: fix the error
                                     log::error!("handle video frame error, {}", e);
+                                    if rd_trace { rd_rejected += 1; }
                                     session.refresh_video(display as _);
                                 }
                                 _ => {}
                             }
+                        }
+
+                        // Decoding and UI callback durations are measured independently.
+                        if rd_trace && rd_period.elapsed() >= std::time::Duration::from_secs(5) {
+                            let seconds = rd_period.elapsed().as_secs_f64();
+                            log::info!(
+                                "RDTRACE_DECODE display={} processed_fps={:.1} decoded_frames={} decode_avg_ms={:.2} decode_max_ms={:.2} ui_callback_avg_ms={:.2} failures={}",
+                                display, rd_processed as f64 / seconds, rd_processed,
+                                rd_decode_ns as f64 / rd_processed.max(1) as f64 / 1e6,
+                                rd_max_decode_ns as f64 / 1e6,
+                                rd_callback_ns as f64 / rd_processed.max(1) as f64 / 1e6,
+                                rd_rejected
+                            );
+                            rd_period = std::time::Instant::now();
+                            rd_processed = 0;
+                            rd_decode_ns = 0;
+                            rd_callback_ns = 0;
+                            rd_max_decode_ns = 0;
+                            rd_rejected = 0;
                         }
 
                         // check invalid decoders
